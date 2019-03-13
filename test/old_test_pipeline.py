@@ -165,33 +165,33 @@ class PipelineTest(test.SparkTest):
         import tensorflow as tf
 
         # reset graph in case we're re-using a Spark python worker (during tests)
-        tf.compat.v1.reset_default_graph()
+        tf.reset_default_graph()
 
         cluster, server = ctx.start_cluster_server(ctx)
         if ctx.job_name == "ps":
           server.join()
         elif ctx.job_name == "worker":
-          with tf.device(tf.compat.v1.train.replica_device_setter(
+          with tf.device(tf.train.replica_device_setter(
             worker_device="/job:worker/task:%d" % ctx.task_index,
             cluster=cluster)):
-            y_ = tf.compat.v1.placeholder(tf.float32, name='y_label')
+            y_ = tf.placeholder(tf.float32, name='y_label')
             label = tf.identity(y_, name='label')
 
-            row_indices = tf.compat.v1.placeholder(tf.int64, name='x_row_indices')
-            col_indices = tf.compat.v1.placeholder(tf.int64, name='x_col_indices')
-            values = tf.compat.v1.placeholder(tf.float32, name='x_values')
+            row_indices = tf.placeholder(tf.int64, name='x_row_indices')
+            col_indices = tf.placeholder(tf.int64, name='x_col_indices')
+            values = tf.placeholder(tf.float32, name='x_values')
             indices = tf.stack([row_indices[0], col_indices[0]], axis=1)
             data = values[0]
 
             x = tf.SparseTensor(indices=indices, values=data, dense_shape=[args.batch_size, 10])
-            w = tf.Variable(tf.random.truncated_normal([10, 1]), name='w')
-            y = tf.sparse.sparse_dense_matmul(x, w, name='y')
+            w = tf.Variable(tf.truncated_normal([10, 1]), name='w')
+            y = tf.sparse_tensor_dense_matmul(x, w, name='y')
 
-            global_step = tf.compat.v1.train.get_or_create_global_step()
-            cost = tf.reduce_mean(input_tensor=tf.square(y_ - y), name='cost')
-            optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.1).minimize(cost, global_step)
+            global_step = tf.train.get_or_create_global_step()
+            cost = tf.reduce_mean(tf.square(y_ - y), name='cost')
+            optimizer = tf.train.GradientDescentOptimizer(0.1).minimize(cost, global_step)
 
-          with tf.compat.v1.train.MonitoredTrainingSession(master=server.target,
+          with tf.train.MonitoredTrainingSession(master=server.target,
                                                  is_chief=(ctx.task_index == 0),
                                                  checkpoint_dir=args.model_dir,
                                                  save_checkpoint_steps=20) as sess:
@@ -305,7 +305,7 @@ class PipelineTest(test.SparkTest):
       import tensorflow as tf
       from tensorflowonspark import TFNode
 
-      class ExportHook(tf.estimator.SessionRunHook):
+      class ExportHook(tf.train.SessionRunHook):
         def __init__(self, export_dir, input_tensor, output_tensor):
           self.export_dir = export_dir
           self.input_tensor = input_tensor
@@ -317,7 +317,7 @@ class PipelineTest(test.SparkTest):
             "test_key": {
               'inputs': {'features': self.input_tensor},
               'outputs': {'prediction': self.output_tensor},
-              'method_name': tf.saved_model.PREDICT_METHOD_NAME
+              'method_name': tf.saved_model.signature_constants.PREDICT_METHOD_NAME
             }
           }
           TFNode.export_saved_model(session,
@@ -326,26 +326,26 @@ class PipelineTest(test.SparkTest):
                                     signatures)
           print("{} ======= Done exporting".format(datetime.now().isoformat()))
 
-      tf.compat.v1.reset_default_graph()                          # reset graph in case we're re-using a Spark python worker
+      tf.reset_default_graph()                          # reset graph in case we're re-using a Spark python worker
 
       cluster, server = TFNode.start_cluster_server(ctx)
       if ctx.job_name == "ps":
         server.join()
       elif ctx.job_name == "worker":
-        with tf.device(tf.compat.v1.train.replica_device_setter(
+        with tf.device(tf.train.replica_device_setter(
           worker_device="/job:worker/task:%d" % ctx.task_index,
           cluster=cluster)):
-          x = tf.compat.v1.placeholder(tf.float32, [None, 2], name='x')
-          y_ = tf.compat.v1.placeholder(tf.float32, [None, 1], name='y_')
-          w = tf.Variable(tf.random.truncated_normal([2, 1]), name='w')
+          x = tf.placeholder(tf.float32, [None, 2], name='x')
+          y_ = tf.placeholder(tf.float32, [None, 1], name='y_')
+          w = tf.Variable(tf.truncated_normal([2, 1]), name='w')
           y = tf.matmul(x, w, name='y')
           y2 = tf.square(y, name="y2")                      # extra/optional output for testing multiple output tensors
-          global_step = tf.compat.v1.train.get_or_create_global_step()
-          cost = tf.reduce_mean(input_tensor=tf.square(y_ - y), name='cost')
-          optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.5).minimize(cost, global_step)
+          global_step = tf.train.get_or_create_global_step()
+          cost = tf.reduce_mean(tf.square(y_ - y), name='cost')
+          optimizer = tf.train.GradientDescentOptimizer(0.5).minimize(cost, global_step)
 
         chief_hooks = [ExportHook(ctx.absolute_path(args.export_dir), x, y)] if args.export_dir else []
-        with tf.compat.v1.train.MonitoredTrainingSession(master=server.target,
+        with tf.train.MonitoredTrainingSession(master=server.target,
                                                is_chief=(ctx.task_index == 0),
                                                checkpoint_dir=args.model_dir,
                                                chief_only_hooks=chief_hooks) as sess:
@@ -361,13 +361,13 @@ class PipelineTest(test.SparkTest):
       """Basic linear regression in a distributed TF cluster using InputMode.TENSORFLOW"""
       import tensorflow as tf
 
-      tf.compat.v1.reset_default_graph()                          # reset graph in case we're re-using a Spark python worker
+      tf.reset_default_graph()                          # reset graph in case we're re-using a Spark python worker
 
       cluster, server = ctx.start_cluster_server()
 
       def _get_examples(batch_size):
         """Generate test data (mocking a queue_runner of file inputs)"""
-        features = tf.random.uniform([batch_size, 2])     # (batch_size x 2)
+        features = tf.random_uniform([batch_size, 2])     # (batch_size x 2)
         weights = tf.constant([[3.14], [1.618]])          # (2, 1)
         labels = tf.matmul(features, weights)
         return features, labels
@@ -375,18 +375,18 @@ class PipelineTest(test.SparkTest):
       if ctx.job_name == "ps":
         server.join()
       elif ctx.job_name == "worker":
-        with tf.device(tf.compat.v1.train.replica_device_setter(
+        with tf.device(tf.train.replica_device_setter(
           worker_device="/job:worker/task:%d" % ctx.task_index,
           cluster=cluster)):
           x, y_ = _get_examples(10)                          # no input placeholders, TF code reads (or in this case "generates") input
-          w = tf.Variable(tf.random.truncated_normal([2, 1]), name='w')
+          w = tf.Variable(tf.truncated_normal([2, 1]), name='w')
           y = tf.matmul(x, w, name='y')
-          global_step = tf.compat.v1.train.get_or_create_global_step()
+          global_step = tf.train.get_or_create_global_step()
 
-          cost = tf.reduce_mean(input_tensor=tf.square(y_ - y), name='cost')
-          optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.5).minimize(cost, global_step)
+          cost = tf.reduce_mean(tf.square(y_ - y), name='cost')
+          optimizer = tf.train.GradientDescentOptimizer(0.5).minimize(cost, global_step)
 
-        with tf.compat.v1.train.MonitoredTrainingSession(master=server.target,
+        with tf.train.MonitoredTrainingSession(master=server.target,
                                                is_chief=(ctx.task_index == 0),
                                                checkpoint_dir=args.model_dir) as sess:
           step = 0
@@ -397,13 +397,13 @@ class PipelineTest(test.SparkTest):
 
         # synchronize completion (via files) to allow time for all other nodes to complete
         done_dir = "{}/done".format(args.model_dir)
-        tf.io.gfile.makedirs(done_dir)
-        with tf.io.gfile.GFile("{}/{}".format(done_dir, ctx.task_index), 'w') as f:
+        tf.gfile.MakeDirs(done_dir)
+        with tf.gfile.GFile("{}/{}".format(done_dir, ctx.task_index), 'w') as f:
           f.write("done!")
 
         # wait up to 60s for other nodes to complete
         for _ in range(60):
-          if len(tf.io.gfile.listdir(done_dir)) < len(ctx.cluster_spec['worker']):
+          if len(tf.gfile.ListDirectory(done_dir)) < len(ctx.cluster_spec['worker']):
             time.sleep(1)
           else:
             break
@@ -415,14 +415,14 @@ class PipelineTest(test.SparkTest):
       import tensorflow as tf
       from tensorflowonspark import TFNode
 
-      tf.compat.v1.reset_default_graph()                          # reset graph in case we're re-using a Spark python worker
-      x = tf.compat.v1.placeholder(tf.float32, [None, 2], name='x')
-      w = tf.Variable(tf.random.truncated_normal([2, 1]), name='w')
+      tf.reset_default_graph()                          # reset graph in case we're re-using a Spark python worker
+      x = tf.placeholder(tf.float32, [None, 2], name='x')
+      w = tf.Variable(tf.truncated_normal([2, 1]), name='w')
       y = tf.matmul(x, w, name='y')
       y2 = tf.square(y, name="y2")                      # extra/optional output for testing multiple output tensors
-      saver = tf.compat.v1.train.Saver()
+      saver = tf.train.Saver()
 
-      with tf.compat.v1.Session() as sess:
+      with tf.Session() as sess:
         # load graph from a checkpoint
         ckpt = tf.train.get_checkpoint_state(args.model_dir)
         assert ckpt and ckpt.model_checkpoint_path, "Invalid model checkpoint path: {}".format(args.model_dir)

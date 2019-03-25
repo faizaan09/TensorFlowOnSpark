@@ -23,8 +23,7 @@ from pyspark.ml.pipeline import Estimator, Model
 from pyspark.sql import Row, SparkSession
 
 import tensorflow as tf
-from tensorflow.contrib.saved_model.python.saved_model import reader
-from tensorflow.python.saved_model import loader
+# from tensorflow.python.saved_model import loader
 from . import TFCluster, gpu_info, dfutil, util
 
 import argparse
@@ -468,7 +467,7 @@ class TFModel(Model, TFParams,
     logging.info("===== 3. inference args + params: {0}".format(local_args))
 
     tf_args = self.args.argv if self.args.argv else local_args
-    rdd_out = dataset.select(input_cols).rdd.mapPartitions(lambda it: _run_model(it, local_args, tf_args))
+    rdd_out = dataset.select(input_cols).rdd.mapPartitions(lambda it: _run_model(self, it, local_args, tf_args))
 
     # convert to a DataFrame-friendly format
     rows_out = rdd_out.map(lambda x: Row(*x))
@@ -480,7 +479,7 @@ global_sess = None            # tf.Session cache
 global_args = None            # args provided to the _run_model() method.  Any change will invalidate the global_sess cache.
 
 
-def _run_model(iterator, args, tf_args):
+def _run_model(model, iterator, args, tf_args):
   """mapPartitions function to run single-node inferencing from a checkpoint/saved_model, using the model's input/output mappings.
 
   Args:
@@ -512,30 +511,33 @@ def _run_model(iterator, args, tf_args):
 
   result = []
 
-  global global_sess, global_args
-  if global_sess and global_args == args:
+  # global global_sess, global_args
+  # if global_sess and global_args == args:
     # if graph/session already loaded/started (and using same args), just reuse it
-    sess = global_sess
-  else:
+    # sess = global_sess
+  # else:
     # otherwise, create new session and load graph from disk
-    tf.reset_default_graph()
-    sess = tf.Session(graph=tf.get_default_graph())
-    if args.export_dir:
-      assert args.tag_set, "Inferencing from a saved_model requires --tag_set"
-      # load graph from a saved_model
-      logging.info("===== restoring from saved_model: {}".format(args.export_dir))
-      loader.load(sess, args.tag_set.split(','), args.export_dir)
-    elif args.model_dir:
-      # load graph from a checkpoint
-      ckpt = tf.train.latest_checkpoint(args.model_dir)
-      assert ckpt, "Invalid model checkpoint path: {}".format(args.model_dir)
-      logging.info("===== restoring from checkpoint: {}".format(ckpt + ".meta"))
-      saver = tf.train.import_meta_graph(ckpt + ".meta", clear_devices=True)
-      saver.restore(sess, ckpt)
-    else:
-      raise Exception("Inferencing requires either --model_dir or --export_dir argument")
-    global_sess = sess
-    global_args = args
+    # tf.compat.v1.reset_default_graph()
+    # sess = tf.compat.v1.Session(graph=tf.compat.v1.get_default_graph())
+  if args.export_dir:
+    assert args.tag_set, "Inferencing from a saved_model requires --tag_set"
+    # load graph from a saved_model
+    logging.info("===== restoring from saved_model: {}".format(args.export_dir))
+    # saved_model.load(export_dir = args.export_dir, tags= args.tag_set.split(','))
+    model = tf.keras.experimental.load_from_saved_model(args.export_dir + os.sep + 'tf_model')
+  elif args.model_dir:
+    # load graph from a checkpoint
+    ckpt = tf.train.latest_checkpoint(args.model_dir)
+    assert ckpt, "Invalid model checkpoint path: {}".format(args.model_dir)
+    logging.info("===== restoring from checkpoint: {}".format(ckpt + ".meta"))
+    # saver = tf.compat.v1.train.import_meta_graph(ckpt + ".meta", clear_devices=True)
+    model = tf.keras.experimental.load_from_saved_model(ckpt)
+    saver = tf.train.Checkpoint()
+    saver.restore(ckpt)
+  else:
+    raise Exception("Inferencing requires either --model_dir or --export_dir argument")
+    # global_sess = sess
+    # global_args = args
 
   # get list of input/output tensors (by name)
   if args.signature_def_key:
@@ -550,13 +552,18 @@ def _run_model(iterator, args, tf_args):
 
   # feed data in batches and return output tensors
   for tensors in yield_batch(iterator, args.batch_size, len(input_tensor_names)):
-    inputs_feed_dict = {}
-    for i in range(len(input_tensors)):
-      inputs_feed_dict[input_tensors[i]] = tensors[i]
-
-    outputs = sess.run(output_tensors, feed_dict=inputs_feed_dict)
+    # inputs_feed_dict = {}
+    # for i in range(len(input_tensors)):
+    #   inputs_feed_dict[input_tensors[i]] = tensors[i]
+    logging.info("\n\n\n\n @@@@@@@ {} \n\n\n\n {} \n\n\n\n".format(model, tensors))
+    outputs = model.predict_on_batch(tensors)
+    logging.info("\n\n\n\n @@@@@@@ {} \n\n\n\n {} \n\n\n\n".format(outputs, tensors))
+    # outputs = sess.run(output_tensors, feed_dict=inputs_feed_dict)
+    # outputs = output_tensors
     lengths = [len(output) for output in outputs]
     input_size = len(tensors[0])
+    
+    logging.info("\n\n{} \n\n {}\n\n".format(tensors, [op for op in outputs[0]]))
     assert all([length == input_size for length in lengths]), "Output array sizes {} must match input size: {}".format(lengths, input_size)
     python_outputs = [output.tolist() for output in outputs]      # convert from numpy to standard python types
     result.extend(zip(*python_outputs))                           # convert to an array of tuples of "output columns"
@@ -593,7 +600,7 @@ def get_meta_graph_def(saved_model_dir, tag_set):
   Returns:
     A TensorFlow meta_graph_def, or raises an Exception otherwise.
   """
-  saved_model = reader.read_saved_model(saved_model_dir)
+  saved_model = tf.saved_model.load(saved_model_dir)
   set_of_tags = set(tag_set.split(','))
   for meta_graph_def in saved_model.meta_graphs:
     if set(meta_graph_def.meta_info_def.tags) == set_of_tags:

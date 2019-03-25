@@ -5,7 +5,7 @@
 
 Primarily, these functions help with:
 
-* starting the TensorFlow ``tf.train.Server`` for the node (allocating GPUs as desired, and determining the node's role in the cluster).
+* starting the TensorFlow ``tf.distribute.Server`` for the node (allocating GPUs as desired, and determining the node's role in the cluster).
 * managing input/output data for *InputMode.SPARK*.
 """
 
@@ -61,10 +61,10 @@ def hdfs_path(ctx, path):
 
 
 def start_cluster_server(ctx, num_gpus=1, rdma=False):
-  """Function that wraps the creation of TensorFlow ``tf.train.Server`` for a node in a distributed TensorFlow cluster.
+  """Function that wraps the creation of TensorFlow ``tf.distribute.Server`` for a node in a distributed TensorFlow cluster.
 
   This is intended to be invoked from within the TF ``map_fun``, replacing explicit code to instantiate ``tf.train.ClusterSpec``
-  and ``tf.train.Server`` objects.
+  and ``tf.distribute.Server`` objects.
 
   Args:
     :ctx: TFNodeContext containing the metadata specific to this node in the cluster.
@@ -111,9 +111,9 @@ def start_cluster_server(ctx, num_gpus=1, rdma=False):
 
         # Create and start a server for the local task.
         if rdma:
-          server = tf.train.Server(cluster, ctx.job_name, ctx.task_index, protocol="grpc+verbs")
+          server = tf.distribute.Server(cluster, ctx.job_name, ctx.task_index, protocol="grpc+verbs")
         else:
-          server = tf.train.Server(cluster, ctx.job_name, ctx.task_index)
+          server = tf.distribute.Server(cluster, ctx.job_name, ctx.task_index)
         gpu_initialized = True
       except Exception as e:
         print(e)
@@ -131,7 +131,7 @@ def start_cluster_server(ctx, num_gpus=1, rdma=False):
     cluster = tf.train.ClusterSpec(cluster_spec)
 
     # Create and start a server for the local task.
-    server = tf.train.Server(cluster, ctx.job_name, ctx.task_index)
+    server = tf.distribute.Server(cluster, ctx.job_name, ctx.task_index)
 
   return (cluster, server)
 
@@ -168,14 +168,14 @@ def export_saved_model(sess, export_dir, tag_set, signatures):
   import tensorflow as tf
   g = sess.graph
   g._unsafe_unfinalize()           # https://github.com/tensorflow/serving/issues/363
-  builder = tf.saved_model.builder.SavedModelBuilder(export_dir)
+  builder = tf.compat.v1.saved_model.builder.SavedModelBuilder(export_dir)
 
   logging.info("===== signatures: {}".format(signatures))
   signature_def_map = {}
   for key, sig in signatures.items():
-    signature_def_map[key] = tf.saved_model.signature_def_utils.build_signature_def(
-        inputs={name: tf.saved_model.utils.build_tensor_info(tensor) for name, tensor in sig['inputs'].items()},
-        outputs={name: tf.saved_model.utils.build_tensor_info(tensor) for name, tensor in sig['outputs'].items()},
+    signature_def_map[key] = tf.compat.v1.saved_model.signature_def_utils.build_signature_def(
+        inputs={name: tf.compat.v1.saved_model.utils.build_tensor_info(tensor) for name, tensor in sig['inputs'].items()},
+        outputs={name: tf.compat.v1.saved_model.utils.build_tensor_info(tensor) for name, tensor in sig['outputs'].items()},
         method_name=sig['method_name'] if 'method_name' in sig else key)
   logging.info("===== signature_def_map: {}".format(signature_def_map))
   builder.add_meta_graph_and_variables(

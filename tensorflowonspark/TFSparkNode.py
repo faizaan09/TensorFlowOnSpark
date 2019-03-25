@@ -451,7 +451,7 @@ def inference(cluster_info, feed_timeout=600, qname='input'):
   Returns:
     A dataRDD.mapPartitions() function
   """
-  def _inference(iter):
+  def _inference(iterable):
     # get shared queue, reconnecting if necessary
     mgr = _get_manager(cluster_info, util.get_ip_address(), util.read_executor_id())
     try:
@@ -461,9 +461,9 @@ def inference(cluster_info, feed_timeout=600, qname='input'):
       msg = "Queue '{}' not found on this node, check for exceptions on other nodes.".format(qname)
       raise Exception(msg)
 
-    logging.info("Feeding partition {0} into {1} queue {2}".format(iter, qname, queue_in))
+    logging.info("Feeding partition {0} into {1} queue {2}".format(iterable, qname, queue_in))
     count = 0
-    for item in iter:
+    for item in iterable:
       count += 1
       queue_in.put(item, block=True)
 

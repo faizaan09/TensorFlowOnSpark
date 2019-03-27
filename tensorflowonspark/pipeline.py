@@ -524,8 +524,8 @@ def _run_model(model, iterator, args, tf_args):
     # load graph from a saved_model
     logging.info("===== restoring from saved_model: {}".format(args.export_dir))
     # saved_model.load(export_dir = args.export_dir, tags= args.tag_set.split(','))
-    model = tf.keras.experimental.load_from_saved_model(args.export_dir + os.sep + 'tf_model')
-  elif args.model_dir:
+    model = tf.keras.experimental.load_from_saved_model(args.export_dir)
+ elif args.model_dir:
     # load graph from a checkpoint
     ckpt = tf.train.latest_checkpoint(args.model_dir)
     assert ckpt, "Invalid model checkpoint path: {}".format(args.model_dir)
@@ -555,7 +555,7 @@ def _run_model(model, iterator, args, tf_args):
     # inputs_feed_dict = {}
     # for i in range(len(input_tensors)):
     #   inputs_feed_dict[input_tensors[i]] = tensors[i]
-    logging.info("\n\n\n\n @@@@@@@ {} \n\n\n\n {} \n\n\n\n".format(model, tensors))
+    logging.info("\n\n\n\n ###### {} \n\n\n\n {} \n\n\n\n".format(model, tensors))
     outputs = model.predict_on_batch(tensors)
     logging.info("\n\n\n\n @@@@@@@ {} \n\n\n\n {} \n\n\n\n".format(outputs, tensors))
     # outputs = sess.run(output_tensors, feed_dict=inputs_feed_dict)

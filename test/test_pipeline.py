@@ -6,6 +6,7 @@ import shutil
 import test
 import time
 import unittest
+import logging
 
 from tensorflowonspark import TFCluster, dfutil
 from tensorflowonspark.pipeline import HasBatchSize, HasSteps, Namespace, TFEstimator, TFParams
@@ -91,6 +92,8 @@ class PipelineTest(test.SparkTest):
     """InputMode.SPARK TFEstimator w/ TFModel inferencing directly from model checkpoint"""
 
     # create a Spark DataFrame of training examples (features, labels)
+    import tensorflow as tf
+    tf.compat.v1.disable_eager_execution()
     trainDF = self.spark.createDataFrame(self.train_examples, ['col1', 'col2'])
 
     # train model
@@ -159,9 +162,54 @@ class PipelineTest(test.SparkTest):
     self.assertAlmostEqual(pred, expected, 5)
     self.assertAlmostEqual(squared_pred, expected * expected, 5)
 
+  def test_keras_saved_model(self):
+    """InputMode.SPARK TFEstimator w/ explicit saved_model export for TFModel inferencing"""
+
+    # create a Spark DataFrame of training examples (features, labels)
+    trainDF = self.spark.createDataFrame(self.train_examples, ['col1', 'col2'])
+
+    # train and export model
+    args = {}
+    estimator = TFEstimator(self.get_function('keras/train'), args) \
+                  .setInputMapping({'col1': 'x', 'col2': 'y_'}) \
+                  .setModelDir(self.model_dir) \
+                  .setExportDir(self.export_dir) \
+                  .setClusterSize(self.num_workers) \
+                  .setNumPS(1) \
+                  .setBatchSize(10) \
+                  .setEpochs(2)
+    model = estimator.fit(trainDF)
+    self.assertTrue(os.path.isdir(self.export_dir))
+
+    # create a Spark DataFrame of test examples (features, labels)
+    testDF = self.spark.createDataFrame(self.test_examples, ['c1', 'c2'])
+
+    # test saved_model using exported signature
+    model.setTagSet('test_tag') \
+          .setSignatureDefKey('test_key') \
+          .setInputMapping({'c1': 'features'}) \
+          .setOutputMapping({'prediction': 'cout'})
+    preds = model.transform(testDF).head()                  # take first/only result
+    pred = preds.cout[0]                                    # unpack scalar from tensor
+    expected = np.sum(self.weights)
+    self.assertAlmostEqual(pred, expected, 5)
+
+    # test saved_model using custom/direct mapping
+    model.setTagSet('test_tag') \
+          .setSignatureDefKey(None) \
+          .setInputMapping({'c1': 'x'}) \
+          .setOutputMapping({'y': 'cout1', 'y2': 'cout2'})
+    preds = model.transform(testDF).head()                  # take first/only result
+    pred = preds.cout1[0]                                   # unpack pred scalar from tensor
+    squared_pred = preds.cout2[0]                           # unpack squared pred from tensor
+
+    self.assertAlmostEqual(pred, expected, 5)
+    self.assertAlmostEqual(squared_pred, expected * expected, 5)  
+
   def test_spark_sparse_tensor(self):
     """InputMode.SPARK feeding sparse tensors"""
     def sparse_train(args, ctx):
+        # https://github.com/tensorflow/tensorflow/issues/21463 useful for sparse tensors on keras models
         import tensorflow as tf
 
         # reset graph in case we're re-using a Spark python worker (during tests)
@@ -171,25 +219,25 @@ class PipelineTest(test.SparkTest):
         if ctx.job_name == "ps":
           server.join()
         elif ctx.job_name == "worker":
-          with tf.device(tf.compat.v1.train.replica_device_setter(
-            worker_device="/job:worker/task:%d" % ctx.task_index,
-            cluster=cluster)):
-            y_ = tf.compat.v1.placeholder(tf.float32, name='y_label')
-            label = tf.identity(y_, name='label')
+          # with tf.device(tf.compat.v1.train.replica_device_setter(
+          #   worker_device="/job:worker/task:%d" % ctx.task_index,
+          #   cluster=cluster)):
+          y_ = tf.compat.v1.placeholder(tf.float32, name='y_label')
+          label = tf.identity(y_, name='label')
 
-            row_indices = tf.compat.v1.placeholder(tf.int64, name='x_row_indices')
-            col_indices = tf.compat.v1.placeholder(tf.int64, name='x_col_indices')
-            values = tf.compat.v1.placeholder(tf.float32, name='x_values')
-            indices = tf.stack([row_indices[0], col_indices[0]], axis=1)
-            data = values[0]
+          row_indices = tf.compat.v1.placeholder(tf.int64, name='x_row_indices')
+          col_indices = tf.compat.v1.placeholder(tf.int64, name='x_col_indices')
+          values = tf.compat.v1.placeholder(tf.float32, name='x_values')
+          indices = tf.stack([row_indices[0], col_indices[0]], axis=1)
+          data = values[0]
 
-            x = tf.SparseTensor(indices=indices, values=data, dense_shape=[args.batch_size, 10])
-            w = tf.Variable(tf.random.truncated_normal([10, 1]), name='w')
-            y = tf.sparse.sparse_dense_matmul(x, w, name='y')
+          x = tf.SparseTensor(indices=indices, values=data, dense_shape=[args.batch_size, 10])
+          w = tf.Variable(tf.random.truncated_normal([10, 1]), name='w')
+          y = tf.sparse.sparse_dense_matmul(x, w, name='y')
 
-            global_step = tf.compat.v1.train.get_or_create_global_step()
-            cost = tf.reduce_mean(input_tensor=tf.square(y_ - y), name='cost')
-            optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.1).minimize(cost, global_step)
+          global_step = tf.compat.v1.train.get_or_create_global_step()
+          cost = tf.reduce_mean(input_tensor=tf.square(y_ - y), name='cost')
+          optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.1).minimize(cost, global_step)
 
           with tf.compat.v1.train.MonitoredTrainingSession(master=server.target,
                                                  is_chief=(ctx.task_index == 0),
@@ -299,11 +347,11 @@ class PipelineTest(test.SparkTest):
 
   def get_function(self, name):
     """Returns a TF map_function for tests (required to avoid serializing the parent module/class)"""
-
     def _spark_train(args, ctx):
       """Basic linear regression in a distributed TF cluster using InputMode.SPARK"""
       import tensorflow as tf
       from tensorflowonspark import TFNode
+      tf.compat.v1.disable_eager_execution()
 
       class ExportHook(tf.estimator.SessionRunHook):
         def __init__(self, export_dir, input_tensor, output_tensor):
@@ -326,36 +374,139 @@ class PipelineTest(test.SparkTest):
                                     signatures)
           print("{} ======= Done exporting".format(datetime.now().isoformat()))
 
-      tf.compat.v1.reset_default_graph()                          # reset graph in case we're re-using a Spark python worker
+      # tf.compat.v1.reset_default_graph()                          # reset graph in case we're re-using a Spark python worker
 
       cluster, server = TFNode.start_cluster_server(ctx)
       if ctx.job_name == "ps":
         server.join()
       elif ctx.job_name == "worker":
-        with tf.device(tf.compat.v1.train.replica_device_setter(
-          worker_device="/job:worker/task:%d" % ctx.task_index,
-          cluster=cluster)):
-          x = tf.compat.v1.placeholder(tf.float32, [None, 2], name='x')
-          y_ = tf.compat.v1.placeholder(tf.float32, [None, 1], name='y_')
-          w = tf.Variable(tf.random.truncated_normal([2, 1]), name='w')
-          y = tf.matmul(x, w, name='y')
-          y2 = tf.square(y, name="y2")                      # extra/optional output for testing multiple output tensors
-          global_step = tf.compat.v1.train.get_or_create_global_step()
-          cost = tf.reduce_mean(input_tensor=tf.square(y_ - y), name='cost')
-          optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.5).minimize(cost, global_step)
 
-        chief_hooks = [ExportHook(ctx.absolute_path(args.export_dir), x, y)] if args.export_dir else []
-        with tf.compat.v1.train.MonitoredTrainingSession(master=server.target,
-                                               is_chief=(ctx.task_index == 0),
-                                               checkpoint_dir=args.model_dir,
-                                               chief_only_hooks=chief_hooks) as sess:
-          tf_feed = TFNode.DataFeed(ctx.mgr, input_mapping=args.input_mapping)
-          while not sess.should_stop() and not tf_feed.should_stop():
-            batch = tf_feed.next_batch(10)
+        def model_fn(features, labels, mode):
+          model = tf.keras.Sequential([
+            tf.keras.layers.Dense(1)
+          ])
+          logits = model(features, training= False)
+
+          if mode == tf.estimator.ModeKeys.PREDICT:
+            predictions = {'logits': logits}
+            return tf.estimator.EstimatorSpec(labels=labels, predictions=predictions)
+
+          optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.5)
+          mse = tf.reduce_mean(tf.losses.mean_squared_error(labels,logits))
+          
+          ckpt = tf.train.Checkpoint(step=tf.compat.v1.train.get_global_step(),
+                             optimizer=optimizer, net=model)
+                             
+          if mode == tf.estimator.ModeKeys.EVAL:
+           return tf.estimator.EstimatorSpec(mode, loss=mse)
+
+          if mode == tf.estimator.ModeKeys.PREDICT:
+            return tf.estimator.EstimatorSpec(mode, predictions = {
+              'output': logits
+            })
+
+          return tf.estimator.EstimatorSpec(
+              mode=mode,
+              loss= mse,
+              train_op=tf.group(optimizer.minimize(mse, tf.compat.v1.train.get_or_create_global_step()), ckpt.step.assign_add(1)),
+              scaffold=tf.compat.v1.train.Scaffold(saver=ckpt))
+
+
+        tf_feed = TFNode.DataFeed(ctx.mgr, input_mapping=args.input_mapping)
+
+        def rdd_generator():        
+          while not tf_feed.should_stop():
+            batch = tf_feed.next_batch(1)
             if args.input_mapping:
               if len(batch['x']) > 0:
-                feed = {x: batch['x'], y_: batch['y_']}
-              sess.run(optimizer, feed_dict=feed)
+                x = batch['x']
+                y_ = batch['y_']
+
+                yield (x,y_)
+              else:
+                return
+        def input_fn(iterable):
+          ds = tf.data.Dataset.from_generator(iterable,
+                                          (tf.float32, tf.float32),
+                                          (tf.TensorShape([1,2]), tf.TensorShape([1,1])))
+          ds = ds.batch(10)
+          return ds
+
+        strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
+        config = tf.estimator.RunConfig(train_distribute=strategy)
+        classifier = tf.estimator.Estimator(model_fn=model_fn, model_dir=args.model_dir, config=config)
+
+        # with tf.device(tf.compat.v1.train.replica_device_setter(
+        #   worker_device="/job:worker/task:%d" % ctx.task_index,
+        #   cluster=cluster)):
+
+        # chief_hooks = [ExportHook(ctx.absolute_path(args.export_dir), x, y)] if args.export_dir else []
+        # with tf.compat.v1.train.MonitoredTrainingSession(master=server.target,
+        #                                        is_chief=(ctx.task_index == 0),
+        #                                        checkpoint_dir=args.model_dir,
+        #                                        chief_only_hooks=chief_hooks) as sess:
+        
+
+
+              # logging.info("\n\n######## {}, {} \n {} \n\n {}\n\n\n\n\n".format(x.shape,y_.shape,x,y_))
+
+        tf.estimator.train_and_evaluate(
+            classifier,
+            train_spec=tf.estimator.TrainSpec(input_fn = lambda: input_fn(rdd_generator)),
+            eval_spec=tf.estimator.EvalSpec(input_fn= lambda: input_fn(rdd_generator))
+        )
+
+        classifier.experimental_export_all_saved_models(args.export_dir, input_fn)
+
+
+    def _keras_train(args, ctx):
+      """Basic linear regression in a distributed TF cluster using InputMode.SPARK"""
+      import tensorflow as tf
+      from tensorflowonspark import TFNode
+      tf.compat.v1.disable_eager_execution()
+
+      cluster, server = TFNode.start_cluster_server(ctx)
+      if ctx.job_name == "ps":
+        server.join()
+      elif ctx.job_name == "worker":
+
+        strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
+
+        with strategy.scope():                  
+          inputs = tf.keras.layers.Input(shape=(2,))
+          predictions = tf.keras.layers.Dense(1)(inputs)
+          model = tf.keras.models.Model(inputs=inputs, outputs=predictions)
+          model.compile(loss='mse',
+                optimizer=tf.keras.optimizers.SGD(learning_rate=0.2))
+
+        tf_feed = TFNode.DataFeed(ctx.mgr, input_mapping=args.input_mapping)
+
+        def rdd_generator():        
+          while not tf_feed.should_stop():
+            batch = tf_feed.next_batch(1)
+            if args.input_mapping:
+              if len(batch['x']) > 0:
+                x = batch['x'][0]
+                y_ = batch['y_'][0]
+
+                yield (x,y_)
+              else:
+                return
+
+        ds = tf.data.Dataset.from_generator(rdd_generator,
+                                          (tf.float32, tf.float32),
+                                          (tf.TensorShape([2,]), tf.TensorShape([1,])))
+        ds = ds.batch(10)
+        
+        logging.info("\n\n\n @@@@@ {} \n\n\n\n {} \n\n\n".format(type(ds),ds))
+        model.fit(ds, epochs = 10, steps_per_epoch=10)
+
+        if args.export_dir:
+          tf.keras.experimental.export_saved_model(model, args.export_dir)
+
+
+
+
 
     def _tf_train(args, ctx):
       """Basic linear regression in a distributed TF cluster using InputMode.TENSORFLOW"""
@@ -375,16 +526,16 @@ class PipelineTest(test.SparkTest):
       if ctx.job_name == "ps":
         server.join()
       elif ctx.job_name == "worker":
-        with tf.device(tf.compat.v1.train.replica_device_setter(
-          worker_device="/job:worker/task:%d" % ctx.task_index,
-          cluster=cluster)):
-          x, y_ = _get_examples(10)                          # no input placeholders, TF code reads (or in this case "generates") input
-          w = tf.Variable(tf.random.truncated_normal([2, 1]), name='w')
-          y = tf.matmul(x, w, name='y')
-          global_step = tf.compat.v1.train.get_or_create_global_step()
+        # with tf.device(tf.compat.v1.train.replica_device_setter(
+        #   worker_device="/job:worker/task:%d" % ctx.task_index,
+        #   cluster=cluster)):
+        x, y_ = _get_examples(10)                          # no input placeholders, TF code reads (or in this case "generates") input
+        w = tf.Variable(tf.random.truncated_normal([2, 1]), name='w')
+        y = tf.matmul(x, w, name='y')
+        global_step = tf.compat.v1.train.get_or_create_global_step()
 
-          cost = tf.reduce_mean(input_tensor=tf.square(y_ - y), name='cost')
-          optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.5).minimize(cost, global_step)
+        cost = tf.reduce_mean(input_tensor=tf.square(y_ - y), name='cost')
+        optimizer = tf.compat.v1.train.GradientDescentOptimizer(0.5).minimize(lambda: cost, global_step)
 
         with tf.compat.v1.train.MonitoredTrainingSession(master=server.target,
                                                is_chief=(ctx.task_index == 0),
@@ -444,6 +595,8 @@ class PipelineTest(test.SparkTest):
       return _tf_train
     elif name == 'tf/export':
       return _tf_export
+    elif name == 'keras/train':
+      return _keras_train
     else:
       raise "Unknown function name: {}".format(name)
 

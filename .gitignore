@@ -12,3 +12,4 @@ test-data
 dependency-reduced-pom.xml
 venv
 .idea
+.vscode/
